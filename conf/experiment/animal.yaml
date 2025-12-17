@@ -1,0 +1,21 @@
+experiment:
+  name: animal
+  trainer: animal
+  dataset: animal10n
+  backbone: vgg19_bn
+  cot: ${cot}
+  root_dir: ${root}
+  warmup_epochs: 10
+  total_epochs: 100
+  lr: 0.02
+  wd: 0.001
+  nesterov: false
+  batch_size: 128
+  num_workers: 5
+  num_classes: 10
+  wandb: true
+  beta: 0.9
+  lr_decay: [50]
+  num_prior: 1
+  optim_goal: ${optim_goal}
+  loss_weight: ${loss_weight}

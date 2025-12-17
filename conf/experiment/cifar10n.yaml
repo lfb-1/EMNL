@@ -1,0 +1,22 @@
+experiment:
+  name: cifar10n
+  trainer: cifarn
+  dataset: cifar10
+  backbone: resnet34
+  target: ${target}
+  root_dir: ${root}
+  warmup_epochs: 10
+  total_epochs: 150
+  lr: 0.02
+  wd: 0.0005
+  nesterov: false
+  batch_size: 128
+  num_workers: 5
+  num_classes: 10
+  wandb: true
+  beta: 0.9
+  lr_decay: [100]
+  num_prior: 2
+  optim_goal: ${optim_goal}
+  memory_queue_len: 3
+  loss_weight: ${loss_weight}

@@ -1,0 +1,10 @@
+defaults:
+  - experiment: cifar10
+
+seed: 42
+desc: baseline
+root: /home/fbl/Documents/Data/cifar-10-batches-py
+optim_goal: pxy
+target: worse_label
+cot: 1
+loss_weight: [1.0, 1.0, 1.0]
