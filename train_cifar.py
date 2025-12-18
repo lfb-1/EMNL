@@ -1,5 +1,6 @@
 from sklearn.mixture import GaussianMixture
 import torch
+import numpy as np
 from ResNet import resnet_cifar34
 from PreResNet import ResNet18
 import torch.optim as optim
@@ -25,10 +26,9 @@ BACKBONES = {
 def build_backbone(name: str, num_classes: int) -> nn.Module:
     key = name.lower()
     if key not in BACKBONES:
-        raise ValueError(
-            f"Unsupported backbone '{name}'. Available options: {sorted(BACKBONES.keys())}"
-        )
+        raise ValueError(f"Unsupported backbone '{name}'. Available options: {sorted(BACKBONES.keys())}")
     return BACKBONES[key](num_classes).cuda()
+
 
 # from torchsort import soft_rank, soft_sort
 from collections import deque
@@ -42,6 +42,12 @@ class CIFAR_Trainer:
         self.num_pri = config.num_prior
         self.beta = config.beta
         self.reg_kl = pxy_kl if config.optim_goal == "pxy" else pyx_kl
+        self.cot = getattr(config, "cot", 1)
+
+        self.net2 = None
+        self.optim2 = None
+        self.latent2 = None
+        self.scheduler2 = None
 
         backbone_name = getattr(config, "backbone", "resnet34")
         self.net = build_backbone(backbone_name, self.num_classes)
@@ -56,7 +62,20 @@ class CIFAR_Trainer:
         self.memory_queue_len = config.memory_queue_len
         self.loss_weight = getattr(config, "loss_weight", [1.0, 1.0, 0.2])
 
+        if self.cot == 2:
+            self.net2 = build_backbone(backbone_name, self.num_classes)
+            self.optim2 = optim.SGD(
+                self.net2.parameters(),
+                lr=config.lr,
+                momentum=0.9,
+                weight_decay=config.wd,
+                nesterov=config.nesterov,
+            )
+            self.latent2 = DynamicPartial(50000, config.beta, config.num_classes)
+
         self.scheduler = optim.lr_scheduler.MultiStepLR(self.optim, milestones=config.lr_decay, gamma=0.1)
+        if self.cot == 2:
+            self.scheduler2 = optim.lr_scheduler.MultiStepLR(self.optim2, milestones=config.lr_decay, gamma=0.1)
 
         self.criterion = nn.CrossEntropyLoss(reduction="none").cuda()
         loader = cifar_dataloader(
@@ -94,6 +113,10 @@ class CIFAR_Trainer:
         self.queue_depth = AverageMeter()
 
     def pipeline(self, train_func):
+        if self.cot == 2:
+            self.pipeline_cot()
+            return
+
         if self.memory_queue_len > 0:
             memory_queue = deque(maxlen=self.memory_queue_len)
         else:
@@ -109,7 +132,48 @@ class CIFAR_Trainer:
             self.wandb_update(epoch)
             self.scheduler.step()
 
-    def train(self, epoch: int, net: nn.Module, optimizer: optim.SGD, mov: DynamicPartial, probs=None, memory_queue=None):
+    def pipeline_cot(self):
+        if self.memory_queue_len > 0:
+            memory_queue_1 = deque(maxlen=self.memory_queue_len)
+            memory_queue_2 = deque(maxlen=self.memory_queue_len)
+        else:
+            memory_queue_1 = None
+            memory_queue_2 = None
+
+        for epoch in range(self.total_epochs):
+            if epoch < self.warmup_epochs:
+                self.train_cot(epoch, self.net, self.optim, self.latent, self.latent2, memory_queue_1)
+                self.train_cot(epoch, self.net2, self.optim2, self.latent2, self.latent, memory_queue_2)
+            else:
+                probs1 = self.eval_train(self.net)
+                probs2 = self.eval_train(self.net2)
+                self.train_cot(
+                    epoch,
+                    self.net,
+                    self.optim,
+                    self.latent,
+                    self.latent2,
+                    memory_queue_1,
+                    probs_peer=probs2,
+                )
+                self.train_cot(
+                    epoch,
+                    self.net2,
+                    self.optim2,
+                    self.latent2,
+                    self.latent,
+                    memory_queue_2,
+                    probs_peer=probs1,
+                )
+
+            self.test_cot()
+            self.wandb_update(epoch)
+            self.scheduler.step()
+            self.scheduler2.step()
+
+    def train(
+        self, epoch: int, net: nn.Module, optimizer: optim.SGD, mov: DynamicPartial, probs=None, memory_queue=None
+    ):
         net.train()
         for batch_idx, (inputs, targets, clean, idx) in enumerate(tqdm(self.train_loader, desc=f"Epoch: {epoch}")):
             inputs, targets, clean = inputs.cuda(), targets.cuda(), clean.cuda().to(torch.int64)
@@ -153,17 +217,20 @@ class CIFAR_Trainer:
             self.queue_depth.update(queue_depth)
 
             ce = self.criterion(tildey, targets).mean()
-            pri = sum([prior_loss([log_outputs, extended_log_outputs], log_prior[i]) for i in range(self.num_pri)]) / self.num_pri
+            pri = (
+                sum([prior_loss([log_outputs, extended_log_outputs], log_prior[i]) for i in range(self.num_pri)])
+                / self.num_pri
+            )
             reg_kl = (
                 sum(
                     [
-                        self.reg_kl([log_outputs, extended_log_outputs], tildey, log_prior[i]) 
+                        self.reg_kl([log_outputs, extended_log_outputs], tildey, log_prior[i])
                         for i in range(self.num_pri)
                     ]
                 )
                 / self.num_pri
             )
-            a,b,c = self.loss_weight
+            a, b, c = self.loss_weight
             l = a * ce + b * pri + c * reg_kl
 
             l.backward()
@@ -171,6 +238,86 @@ class CIFAR_Trainer:
 
             # MoCo: Update momentum encoder and memory queue for the next iteration.
             # This follows the standard MoCo procedure.
+
+            self.metrics_update(inputs, clean, targets, prior[0], prior_cov[0], ce, pri, reg_kl)
+            self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
+
+    def train_cot(
+        self,
+        epoch: int,
+        net: nn.Module,
+        optimizer: optim.SGD,
+        mov: DynamicPartial,
+        peer_mov: DynamicPartial,
+        memory_queue=None,
+        probs_peer=None,
+    ):
+        net.train()
+        for batch_idx, (inputs, targets, clean, idx) in enumerate(tqdm(self.train_loader, desc=f"Epoch: {epoch}")):
+            inputs, targets, clean = inputs.cuda(), targets.cuda(), clean.cuda().to(torch.int64)
+            onehot_labels = F.one_hot(targets, self.num_classes).float().cuda()
+
+            optimizer.zero_grad()
+
+            lam = np.random.beta(0.5, 0.5)
+            lam = max(lam, 1 - lam)
+            mix_idx = torch.randperm(inputs.shape[0], device=inputs.device)
+            mix_inputs = lam * inputs + (1 - lam) * inputs[mix_idx]
+            mix_targets = lam * onehot_labels + (1 - lam) * onehot_labels[mix_idx]
+
+            outputs, tildey, _ = net(mix_inputs)
+
+            pred = [
+                F.one_hot(peer_mov.sample_latent(idx).sample(), self.num_classes).float() for _ in range(self.num_pri)
+            ]
+            prior_cov = [(pred[i] + onehot_labels).clamp(max=1.0) for i in range(self.num_pri)]
+            prior = [
+                sample_neg(
+                    prior_cov[i],
+                    self.num_classes,
+                    probs_peer[idx] if probs_peer is not None else None,
+                )
+                for i in range(self.num_pri)
+            ]
+            prior = [torch.clamp(p, max=1.0) / torch.clamp(p.sum(1, keepdim=True), min=1e-8) for p in prior]
+
+            mov.update_hist(outputs.softmax(1), idx)
+
+            log_outputs = outputs.log_softmax(1)
+            log_prior = [prior[i].clamp(min=1e-9, max=1.0).log() for i in range(self.num_pri)]
+
+            if memory_queue is None:
+                extended_log_outputs = log_outputs
+                queue_depth = 0
+            else:
+                history_depth = len(memory_queue)
+                if history_depth == 0:
+                    extended_log_outputs = log_outputs
+                else:
+                    extended_log_outputs = torch.cat([log_outputs] + list(memory_queue), dim=0)
+                memory_queue.append(log_outputs.detach())
+                queue_depth = history_depth
+            self.queue_depth.update(queue_depth)
+
+            ce = -torch.mean(torch.sum(F.log_softmax(tildey, dim=1) * mix_targets, dim=1))
+            pri = (
+                sum([prior_loss([log_outputs, extended_log_outputs], log_prior[i]) for i in range(self.num_pri)])
+                / self.num_pri
+            )
+            reg_kl = (
+                sum(
+                    [
+                        self.reg_kl([log_outputs, extended_log_outputs], tildey, log_prior[i])
+                        for i in range(self.num_pri)
+                    ]
+                )
+                / self.num_pri
+            )
+            a, b, c = self.loss_weight
+            loss = a * ce + b * pri + c * reg_kl
+
+            loss.backward()
+            optimizer.step()
 
             self.metrics_update(inputs, clean, targets, prior[0], prior_cov[0], ce, pri, reg_kl)
             self.train_acc.update(self.calc_acc(outputs, clean.int()).item() * 100.0)
@@ -200,10 +347,25 @@ class CIFAR_Trainer:
 
     @torch.no_grad()
     def test(self, net):
+        if self.cot == 2:
+            self.test_cot()
+            return
         net.eval()
         for batch_idx, (inputs, targets) in enumerate(self.test_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
-            outputs = net.forward_test(inputs)
+            # outputs = net.forward_test(inputs)
+            outputs, _, _ = net(inputs)
+            self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)
+
+    @torch.no_grad()
+    def test_cot(self):
+        self.net.eval()
+        self.net2.eval()
+        for batch_idx, (inputs, targets) in enumerate(self.test_loader):
+            inputs, targets = inputs.cuda(), targets.cuda()
+            outputs1, _, _ = self.net(inputs)
+            outputs2, _, _ = self.net2(inputs)
+            outputs = outputs1 + outputs2
             self.test_acc.update(self.calc_acc(outputs, targets.int()).item() * 100.0)
 
     def metrics_update(self, inputs, clean, targets, prior, prior_cov, ce, pri, reg_kl):

@@ -5,7 +5,12 @@ do
     do
         for i in 0.2 0.3 0.4 0.5
         do
-            python main.py --r $i  --desc "c10"$j"_final_"$i"_"$s --optim_goal $j --config cifar10 --seed $s;
+            python main.py \
+                experiment=cifar10 \
+                experiment.r=$i \
+                desc="c10"$j"_final_"$i"_"$s \
+                optim_goal=$j \
+                seed=$s;
         done
     done
 done
@@ -17,7 +22,12 @@ done
 #     do
 #         for i in 0.2 0.3 0.4 0.5
 #         do
-#             python main.py --r $i  --desc "c100"$j"_final_"$i"_"$s --optim_goal $j --config cifar100 --seed $s;
+#             python main.py \
+#                 experiment=cifar100 \
+#                 experiment.r=$i \
+#                 desc="c100"$j"_final_"$i"_"$s \
+#                 optim_goal=$j \
+#                 seed=$s;
 #         done
 #     done
 # done
@@ -29,7 +39,12 @@ done
 #     do
 #         for i in worse_label aggre_label random_label1 random_label2 random_label3
 #         do
-#             python main.py --target $i --desc "c10N"$j"_wkl_"$i"_"$s --optim_goal $j --config cifar10n --seed $s;
+#             python main.py \
+#                 experiment=cifar10n \
+#                 target=$i \
+#                 desc="c10N"$j"_wkl_"$i"_"$s \
+#                 optim_goal=$j \
+#                 seed=$s;
 #         done
 #     done
 # done
@@ -41,7 +56,12 @@ done
 #     do
 #         for i in noisy_label
 #         do
-#             python main.py --target $i --desc "c100N"$j"_final_"$i"_"$s --optim_goal $j --config cifar100n --seed $s;
+#             python main.py \
+#                 experiment=cifar100n \
+#                 target=$i \
+#                 desc="c100N"$j"_final_"$i"_"$s \
+#                 optim_goal=$j \
+#                 seed=$s;
 #         done
 #     done
 # done
@@ -49,7 +69,12 @@ done
 # RED
 # for i in 0.2 0.4 0.6 0.8
 # do
-#     python main.py --r $i --config red --desc "pyx_red_"$i --root /run/media/Data/red_blue/ --optim_goal pyx
+#     python main.py \
+#         experiment=red \
+#         experiment.r=$i \
+#         desc="pyx_red_"$i \
+#         root=/run/media/Data/red_blue/ \
+#         optim_goal=pyx
 # done
 
 # ANIMAL
@@ -57,6 +82,11 @@ done
 # do
 #     for j in pxy pyx
 #     do
-#         python main.py --config animal --desc "A10"$j"_normgen" --optim_goal $j --root "/media/hdd/fb/data_animal10n/" --cot $i;
+#         python main.py \
+#             experiment=animal \
+#             desc="A10"$j"_normgen" \
+#             optim_goal=$j \
+#             root=/media/hdd/fb/data_animal10n/ \
+#             cot=$i;
 #     done
 # done

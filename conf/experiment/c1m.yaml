@@ -1,20 +1,19 @@
-experiment:
-  name: c1m
-  trainer: c1m
-  dataset: cifar100
-  backbone: resnet34
-  root_dir: ${root}
-  warmup_epochs: 1
-  total_epochs: 80
-  lr: 0.002
-  wd: 0.001
-  nesterov: false
-  batch_size: 64
-  num_workers: 5
-  num_classes: 14
-  wandb: true
-  beta: 0.9
-  lr_decay: [40]
-  num_prior: 1
-  optim_goal: ${optim_goal}
-  loss_weight: ${loss_weight}
+name: c1m
+trainer: c1m
+dataset: cifar100
+backbone: resnet34
+root_dir: ${root}
+warmup_epochs: 1
+total_epochs: 80
+lr: 0.002
+wd: 0.001
+nesterov: false
+batch_size: 64
+num_workers: 5
+num_classes: 14
+wandb: true
+beta: 0.9
+lr_decay: [40]
+num_prior: 1
+optim_goal: ${optim_goal}
+loss_weight: ${loss_weight}
